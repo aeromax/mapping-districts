@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Highlight Streets by Town or Zip</title>
+  <meta charset="utf-8" />
+  <style>
+    #map { height: 80vh; width: 100%; margin-top: 10px; }
+    textarea, input { width: 100%; margin-top: 5px; }
+    button { margin-top: 10px; }
+  </style>
+  <link
+    rel="stylesheet"
+    href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <script
+    src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+  ></script>
+</head>
+<body>
+  <h2>Highlight Streets by Name and Town or Zip</h2>
+  <label>Town or Zip Code:</label>
+  <input type="text" id="locationInput" value="Trumbull, CT" />
+
+  <label>Streets to Highlight (one per line):</label>
+  <textarea id="streets">Tashua Rd
+Booth Hill Rd
+Church Hill Rd</textarea>
+
+  <button onclick="highlightStreets()">Highlight</button>
+  <div id="map"></div>
+
+  <script>
+    const map = L.map('map').setView([41.2428, -73.2087], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; OpenStreetMap contributors'
+    }).addTo(map);
+
+    let drawnLayers = [];
+
+    function clearMap() {
+      drawnLayers.forEach(layer => map.removeLayer(layer));
+      drawnLayers = [];
+    }
+
+    async function geocodeLocation(location) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(location)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+
+  if (!data || !data[0]) {
+    alert("Location not found.");
+    throw new Error("Geocoding failed");
+  }
+
+  const relId = parseInt(data[0].osm_id);
+  const areaId = 3600000000 + relId;
+
+  return {
+    areaId,
+    center: [parseFloat(data[0].lat), parseFloat(data[0].lon)]
+  };
+}
+
+
+    async function highlightStreets() {
+  clearMap();
+
+  const location = document.getElementById('locationInput').value.trim();
+  const rawLines = document.getElementById('streets').value
+    .split('\n')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const baseLocation = location ? `, ${location}` : '';
+
+  const segments = [];
+
+  for (const line of rawLines) {
+    const match = line.match(/^(\d+)\s*[–-]\s*(\d+)\s+(.+)$/); // e.g., 6401-7125 Main Street
+    if (match) {
+      const startNum = match[1];
+      const endNum = match[2];
+      const streetName = match[3];
+
+      const startAddr = `${startNum} ${streetName}${baseLocation}`;
+      const endAddr = `${endNum} ${streetName}${baseLocation}`;
+
+      try {
+        const start = await geocodeToCoords(startAddr);
+        const end = await geocodeToCoords(endAddr);
+        if (start && end) {
+          await drawRouteSegment(start, end);
+        }
+      } catch (err) {
+        console.warn("Failed to map segment:", line, err);
+      }
+
+    } else {
+      // fallback: treat it as a full road name for full-street highlight
+      segments.push(line.replace(/^\d+\s*[–-]\s*\d+\s+/, '').trim());
+    }
+  }
+
+  // Highlight full named streets via Overpass (existing logic)
+  if (segments.length > 0) {
+    const cleaned = segments
+      .map(name => name.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&'))
+      .join('|');
+
+    const locationData = await geocodeLocation(location);
+    map.setView(locationData.center, 13);
+
+    const query = `
+      [out:json][timeout:25];
+      area(${locationData.areaId})->.a;
+      (
+        way["highway"]["name"~"^(${cleaned})$", i](area.a);
+      );
+      out geom;
+    `;
+
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: query
+    });
+
+    const data = await res.json();
+    data.elements.forEach(way => {
+      const latlngs = way.geometry.map(pt => [pt.lat, pt.lon]);
+      const polyline = L.polyline(latlngs, {
+        color: 'blue',
+        weight: 4
+      }).addTo(map);
+      drawnLayers.push(polyline);
+    });
+  }
+}
+async function geocodeToCoords(address) {
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(address)}`;
+  const res = await fetch(url);
+  const data = await res.json();
+  if (data && data[0]) {
+    return {
+      lat: parseFloat(data[0].lat),
+      lon: parseFloat(data[0].lon)
+    };
+  }
+  throw new Error("Address not found: " + address);
+}
+
+async function drawRouteSegment(start, end) {
+  const url = `https://router.project-osrm.org/route/v1/driving/${start.lon},${start.lat};${end.lon},${end.lat}?overview=full&geometries=geojson`;
+  const res = await fetch(url);
+  const data = await res.json();
+
+  if (data && data.routes && data.routes.length > 0) {
+    const coords = data.routes[0].geometry.coordinates.map(([lon, lat]) => [lat, lon]);
+    const polyline = L.polyline(coords, {
+      color: 'green',
+      weight: 5,
+      opacity: 0.8
+    }).addTo(map);
+    drawnLayers.push(polyline);
+  } else {
+    throw new Error("No route found");
+  }
+}
+
+  </script>
+</body>
+</html>
